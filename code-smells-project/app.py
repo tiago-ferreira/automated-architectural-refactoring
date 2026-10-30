@@ -1,7 +1,8 @@
 """Composition Root da API de E-commerce (Padrão MVC)."""
 from flask import Flask
 from flask_cors import CORS
-from config.settings import Config, close_db, init_db, logger
+from config.database import close_db, init_db
+from config.settings import Config, logger
 from middlewares.error_handler import register_error_handlers
 from views.routes import register_routes
 

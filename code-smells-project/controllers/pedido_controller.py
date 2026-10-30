@@ -1,30 +1,54 @@
-"""Controller de Pedidos, Relatórios de Vendas e Operações Administrativas."""
-from typing import Any, Tuple
+"""Controller de Pedidos e Relatórios de Vendas."""
+from typing import Any, Dict, List, Optional, Tuple
 from flask import jsonify, request
 from config.settings import Config, logger
-from models import pedido_model
+from models import pedido_model, usuario_model
+
+
+def _is_positive_int(value: Any) -> bool:
+    return not isinstance(value, bool) and isinstance(value, int) and value > 0
+
+
+def _validar_itens_pedido(itens: Any) -> Tuple[Optional[List[Dict[str, int]]], Optional[str]]:
+    if not isinstance(itens, list) or len(itens) == 0:
+        return None, "Pedido deve ter pelo menos 1 item"
+
+    itens_limpos: List[Dict[str, int]] = []
+    for item in itens:
+        if not isinstance(item, dict):
+            return None, "Formato de item inválido"
+        produto_id = item.get("produto_id")
+        quantidade = item.get("quantidade")
+        if not _is_positive_int(produto_id):
+            return None, "produto_id deve ser um inteiro positivo"
+        if not _is_positive_int(quantidade):
+            return None, "quantidade deve ser um inteiro positivo"
+        itens_limpos.append({"produto_id": produto_id, "quantidade": quantidade})
+
+    return itens_limpos, None
 
 
 def criar_pedido() -> Tuple[Any, int]:
     dados = request.get_json(silent=True)
-    if not dados:
-        return jsonify({"erro": "Dados inválidos"}), 400
+    if not isinstance(dados, dict) or not dados:
+        return jsonify({"erro": "Dados inválidos", "sucesso": False}), 400
 
     usuario_id = dados.get("usuario_id")
-    itens = dados.get("itens", [])
+    if not _is_positive_int(usuario_id):
+        return jsonify({"erro": "Usuario ID inválido", "sucesso": False}), 400
 
-    if not usuario_id:
-        return jsonify({"erro": "Usuario ID é obrigatório"}), 400
-    if not itens or len(itens) == 0:
-        return jsonify({"erro": "Pedido deve ter pelo menos 1 item"}), 400
+    itens_validados, erro_itens = _validar_itens_pedido(dados.get("itens"))
+    if erro_itens or itens_validados is None:
+        return jsonify({"erro": erro_itens, "sucesso": False}), 400
 
-    resultado = pedido_model.criar_pedido(usuario_id, itens)
+    if not usuario_model.get_usuario_por_id(usuario_id):
+        return jsonify({"erro": "Usuário não encontrado", "sucesso": False}), 404
+
+    resultado = pedido_model.criar_pedido(usuario_id, itens_validados)
     if "erro" in resultado:
         return jsonify({"erro": resultado["erro"], "sucesso": False}), 400
 
-    logger.info(
-        "Pedido %s criado para usuario %s", resultado["pedido_id"], usuario_id
-    )
+    logger.info("Pedido %s criado para usuario %s", resultado["pedido_id"], usuario_id)
     return (
         jsonify(
             {
@@ -48,13 +72,18 @@ def listar_todos_pedidos() -> Tuple[Any, int]:
 
 
 def atualizar_status_pedido(pedido_id: int) -> Tuple[Any, int]:
-    dados = request.get_json(silent=True) or {}
+    dados = request.get_json(silent=True)
+    if not isinstance(dados, dict):
+        return jsonify({"erro": "Dados inválidos", "sucesso": False}), 400
+
     novo_status = dados.get("status", "")
-
     if novo_status not in Config.VALID_ORDER_STATUSES:
-        return jsonify({"erro": "Status inválido"}), 400
+        return jsonify({"erro": "Status inválido", "sucesso": False}), 400
 
-    pedido_model.atualizar_status_pedido(pedido_id, novo_status)
+    atualizado = pedido_model.atualizar_status_pedido(pedido_id, novo_status)
+    if not atualizado:
+        return jsonify({"erro": "Pedido não encontrado", "sucesso": False}), 404
+
     logger.info("Pedido %d atualizado para status '%s'", pedido_id, novo_status)
     return jsonify({"sucesso": True, "mensagem": "Status atualizado"}), 200
 
@@ -62,62 +91,3 @@ def atualizar_status_pedido(pedido_id: int) -> Tuple[Any, int]:
 def relatorio_vendas() -> Tuple[Any, int]:
     relatorio = pedido_model.relatorio_vendas()
     return jsonify({"dados": relatorio, "sucesso": True}), 200
-
-
-def health_check() -> Tuple[Any, int]:
-    counts = pedido_model.get_database_counts()
-    return (
-        jsonify(
-            {
-                "status": "ok",
-                "database": "connected",
-                "counts": counts,
-                "versao": Config.VERSION,
-                "ambiente": Config.ENVIRONMENT,
-                "db_path": Config.DB_PATH,
-                "debug": Config.DEBUG,
-            }
-        ),
-        200,
-    )
-
-
-def index() -> Tuple[Any, int]:
-    return (
-        jsonify(
-            {
-                "mensagem": "Bem-vindo à API da Loja",
-                "versao": Config.VERSION,
-                "endpoints": {
-                    "produtos": "/produtos",
-                    "usuarios": "/usuarios",
-                    "pedidos": "/pedidos",
-                    "login": "/login",
-                    "relatorios": "/relatorios/vendas",
-                    "health": "/health",
-                },
-            }
-        ),
-        200,
-    )
-
-
-def reset_database() -> Tuple[Any, int]:
-    pedido_model.reset_all_tables()
-    logger.warning("Banco de dados resetado via rota administrativa")
-    return jsonify({"mensagem": "Banco de dados resetado", "sucesso": True}), 200
-
-
-def executar_query() -> Tuple[Any, int]:
-    dados = request.get_json(silent=True) or {}
-    query = dados.get("sql", "")
-    if not query:
-        return jsonify({"erro": "Query não informada"}), 400
-
-    try:
-        result = pedido_model.executar_query_segura(query)
-        return jsonify({"dados": result, "sucesso": True}), 200
-    except PermissionError as exc:
-        return jsonify({"erro": str(exc), "sucesso": False}), 403
-    except ValueError as exc:
-        return jsonify({"erro": str(exc), "sucesso": False}), 400

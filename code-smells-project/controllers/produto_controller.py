@@ -5,10 +5,18 @@ from config.settings import Config, logger
 from models import produto_model
 
 
+def _is_valid_number(value: Any) -> bool:
+    return not isinstance(value, bool) and isinstance(value, (int, float))
+
+
+def _is_valid_int(value: Any) -> bool:
+    return not isinstance(value, bool) and isinstance(value, int)
+
+
 def _validar_payload_produto(
     dados: Optional[Dict[str, Any]], validar_tamanho_e_categoria: bool = True
 ) -> Optional[str]:
-    if not dados:
+    if not isinstance(dados, dict) or not dados:
         return "Dados inválidos"
     if "nome" not in dados:
         return "Nome é obrigatório"
@@ -17,18 +25,24 @@ def _validar_payload_produto(
     if "estoque" not in dados:
         return "Estoque é obrigatório"
 
+    nome = dados["nome"]
     preco = dados["preco"]
     estoque = dados["estoque"]
-    nome = str(dados["nome"])
     categoria = dados.get("categoria", Config.DEFAULT_CATEGORY)
 
+    if not isinstance(nome, str) or not isinstance(categoria, str):
+        return "Nome e categoria devem ser texto"
+    if not _is_valid_number(preco):
+        return "Preço deve ser numérico"
+    if not _is_valid_int(estoque):
+        return "Estoque deve ser um número inteiro"
     if preco < 0:
         return "Preço não pode ser negativo"
     if estoque < 0:
         return "Estoque não pode ser negativo"
 
     if validar_tamanho_e_categoria:
-        if len(nome) < Config.MIN_PRODUCT_NAME_LENGTH:
+        if len(nome.strip()) < Config.MIN_PRODUCT_NAME_LENGTH:
             return "Nome muito curto"
         if len(nome) > Config.MAX_PRODUCT_NAME_LENGTH:
             return "Nome muito longo"
@@ -44,8 +58,8 @@ def listar_produtos() -> Tuple[Any, int]:
     return jsonify({"dados": produtos, "sucesso": True}), 200
 
 
-def buscar_produto(id: int) -> Tuple[Any, int]:
-    produto = produto_model.get_produto_por_id(id)
+def buscar_produto(produto_id: int) -> Tuple[Any, int]:
+    produto = produto_model.get_produto_por_id(produto_id)
     if produto:
         return jsonify({"dados": produto, "sucesso": True}), 200
     return jsonify({"erro": "Produto não encontrado", "sucesso": False}), 404
@@ -55,12 +69,12 @@ def criar_produto() -> Tuple[Any, int]:
     dados = request.get_json(silent=True)
     erro = _validar_payload_produto(dados, validar_tamanho_e_categoria=True)
     if erro:
-        return jsonify({"erro": erro}), 400
+        return jsonify({"erro": erro, "sucesso": False}), 400
 
     produto_id = produto_model.criar_produto(
-        nome=dados["nome"],
-        descricao=dados.get("descricao", ""),
-        preco=dados["preco"],
+        nome=dados["nome"].strip(),
+        descricao=str(dados.get("descricao", "")),
+        preco=float(dados["preco"]),
         estoque=dados["estoque"],
         categoria=dados.get("categoria", Config.DEFAULT_CATEGORY),
     )
@@ -73,34 +87,34 @@ def criar_produto() -> Tuple[Any, int]:
     )
 
 
-def atualizar_produto(id: int) -> Tuple[Any, int]:
-    produto_existente = produto_model.get_produto_por_id(id)
+def atualizar_produto(produto_id: int) -> Tuple[Any, int]:
+    produto_existente = produto_model.get_produto_por_id(produto_id)
     if not produto_existente:
-        return jsonify({"erro": "Produto não encontrado"}), 404
+        return jsonify({"erro": "Produto não encontrado", "sucesso": False}), 404
 
     dados = request.get_json(silent=True)
     erro = _validar_payload_produto(dados, validar_tamanho_e_categoria=False)
     if erro:
-        return jsonify({"erro": erro}), 400
+        return jsonify({"erro": erro, "sucesso": False}), 400
 
     produto_model.atualizar_produto(
-        produto_id=id,
-        nome=dados["nome"],
-        descricao=dados.get("descricao", ""),
-        preco=dados["preco"],
+        produto_id=produto_id,
+        nome=dados["nome"].strip(),
+        descricao=str(dados.get("descricao", "")),
+        preco=float(dados["preco"]),
         estoque=dados["estoque"],
         categoria=dados.get("categoria", Config.DEFAULT_CATEGORY),
     )
     return jsonify({"sucesso": True, "mensagem": "Produto atualizado"}), 200
 
 
-def deletar_produto(id: int) -> Tuple[Any, int]:
-    produto = produto_model.get_produto_por_id(id)
+def deletar_produto(produto_id: int) -> Tuple[Any, int]:
+    produto = produto_model.get_produto_por_id(produto_id)
     if not produto:
-        return jsonify({"erro": "Produto não encontrado"}), 404
+        return jsonify({"erro": "Produto não encontrado", "sucesso": False}), 404
 
-    produto_model.deletar_produto(id)
-    logger.info("Produto %d deletado", id)
+    produto_model.deletar_produto(produto_id)
+    logger.info("Produto %d deletado", produto_id)
     return jsonify({"sucesso": True, "mensagem": "Produto deletado"}), 200
 
 
@@ -114,7 +128,7 @@ def buscar_produtos() -> Tuple[Any, int]:
         preco_min = float(preco_min_raw) if preco_min_raw else None
         preco_max = float(preco_max_raw) if preco_max_raw else None
     except ValueError:
-        return jsonify({"erro": "Parâmetros de preço inválidos"}), 400
+        return jsonify({"erro": "Parâmetros de preço inválidos", "sucesso": False}), 400
 
     resultados = produto_model.buscar_produtos(termo, categoria, preco_min, preco_max)
     return (

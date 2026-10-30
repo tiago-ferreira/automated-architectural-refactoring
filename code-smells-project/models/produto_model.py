@@ -1,6 +1,6 @@
 """Model de Produtos com queries 100% parametrizadas."""
 from typing import Any, Dict, List, Optional
-from config.settings import get_db
+from config.database import get_db
 
 
 def _row_to_produto_dict(row) -> Dict[str, Any]:
@@ -17,8 +17,7 @@ def _row_to_produto_dict(row) -> Dict[str, Any]:
 
 
 def get_todos_produtos() -> List[Dict[str, Any]]:
-    db = get_db()
-    cursor = db.cursor()
+    cursor = get_db().cursor()
     cursor.execute(
         "SELECT id, nome, descricao, preco, estoque, categoria, ativo, criado_em FROM produtos"
     )
@@ -26,8 +25,7 @@ def get_todos_produtos() -> List[Dict[str, Any]]:
 
 
 def get_produto_por_id(produto_id: int) -> Optional[Dict[str, Any]]:
-    db = get_db()
-    cursor = db.cursor()
+    cursor = get_db().cursor()
     cursor.execute(
         "SELECT id, nome, descricao, preco, estoque, categoria, ativo, criado_em FROM produtos WHERE id = ?",
         (produto_id,),
@@ -46,7 +44,7 @@ def criar_produto(
         (nome, descricao, preco, estoque, categoria),
     )
     db.commit()
-    return cursor.lastrowid
+    return int(cursor.lastrowid)
 
 
 def atualizar_produto(
@@ -56,7 +54,7 @@ def atualizar_produto(
     preco: float,
     estoque: int,
     categoria: str,
-) -> bool:
+) -> None:
     db = get_db()
     cursor = db.cursor()
     cursor.execute(
@@ -68,15 +66,13 @@ def atualizar_produto(
         (nome, descricao, preco, estoque, categoria, produto_id),
     )
     db.commit()
-    return True
 
 
-def deletar_produto(produto_id: int) -> bool:
+def deletar_produto(produto_id: int) -> None:
     db = get_db()
     cursor = db.cursor()
     cursor.execute("DELETE FROM produtos WHERE id = ?", (produto_id,))
     db.commit()
-    return True
 
 
 def buscar_produtos(
@@ -85,9 +81,7 @@ def buscar_produtos(
     preco_min: Optional[float] = None,
     preco_max: Optional[float] = None,
 ) -> List[Dict[str, Any]]:
-    db = get_db()
-    cursor = db.cursor()
-
+    cursor = get_db().cursor()
     query = (
         "SELECT id, nome, descricao, preco, estoque, categoria, ativo, criado_em "
         "FROM produtos WHERE 1=1"

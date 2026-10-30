@@ -1,61 +1,60 @@
 """Model de Pedidos e Relatórios com queries parametrizadas, transações atômicas e zero N+1."""
 from typing import Any, Dict, List, Optional
-from config.settings import Config, get_db
+from config.database import get_db
+from config.settings import Config
 
 
-def criar_pedido(usuario_id: int, itens: List[Dict[str, Any]]) -> Dict[str, Any]:
+def criar_pedido(usuario_id: int, itens: List[Dict[str, int]]) -> Dict[str, Any]:
     db = get_db()
     cursor = db.cursor()
 
-    total = 0.0
-    itens_validados = []
-
-    for item in itens:
-        produto_id = item["produto_id"]
-        quantidade = item["quantidade"]
-        cursor.execute(
-            "SELECT id, nome, preco, estoque FROM produtos WHERE id = ?",
-            (produto_id,),
-        )
-        produto = cursor.fetchone()
-        if produto is None:
-            return {"erro": f"Produto {produto_id} não encontrado"}
-        if produto["estoque"] < quantidade:
-            return {"erro": f"Estoque insuficiente para {produto['nome']}"}
-
-        preco_unitario = float(produto["preco"])
-        total += preco_unitario * quantidade
-        itens_validados.append(
-            {
-                "produto_id": produto_id,
-                "quantidade": quantidade,
-                "preco_unitario": preco_unitario,
-            }
-        )
-
     try:
+        produtos_cache: Dict[int, Dict[str, Any]] = {}
+        total = 0.0
+
+        for item in itens:
+            produto_id = item["produto_id"]
+            quantidade = item["quantidade"]
+            if produto_id not in produtos_cache:
+                cursor.execute(
+                    "SELECT id, nome, preco FROM produtos WHERE id = ?",
+                    (produto_id,),
+                )
+                produto = cursor.fetchone()
+                if produto is None:
+                    db.rollback()
+                    return {"erro": f"Produto {produto_id} não encontrado"}
+                produtos_cache[produto_id] = {
+                    "nome": produto["nome"],
+                    "preco": float(produto["preco"]),
+                }
+            total += produtos_cache[produto_id]["preco"] * quantidade
+
         cursor.execute(
             "INSERT INTO pedidos (usuario_id, status, total) VALUES (?, ?, ?)",
             (usuario_id, Config.DEFAULT_ORDER_STATUS, total),
         )
-        pedido_id = cursor.lastrowid
+        pedido_id = int(cursor.lastrowid)
 
-        for item_val in itens_validados:
+        for item in itens:
+            produto_id = item["produto_id"]
+            quantidade = item["quantidade"]
+            produto_info = produtos_cache[produto_id]
+
+            cursor.execute(
+                "UPDATE produtos SET estoque = estoque - ? WHERE id = ? AND estoque >= ?",
+                (quantidade, produto_id, quantidade),
+            )
+            if cursor.rowcount == 0:
+                db.rollback()
+                return {"erro": f"Estoque insuficiente para {produto_info['nome']}"}
+
             cursor.execute(
                 """
                 INSERT INTO itens_pedido (pedido_id, produto_id, quantidade, preco_unitario)
                 VALUES (?, ?, ?, ?)
                 """,
-                (
-                    pedido_id,
-                    item_val["produto_id"],
-                    item_val["quantidade"],
-                    item_val["preco_unitario"],
-                ),
-            )
-            cursor.execute(
-                "UPDATE produtos SET estoque = estoque - ? WHERE id = ?",
-                (item_val["quantidade"], item_val["produto_id"]),
+                (pedido_id, produto_id, quantidade, produto_info["preco"]),
             )
 
         db.commit()
@@ -69,8 +68,7 @@ def _carregar_pedidos_com_itens(
     filtro_usuario_id: Optional[int] = None,
 ) -> List[Dict[str, Any]]:
     """Carrega pedidos e seus respectivos itens em lote com LEFT JOIN (elimina N+1)."""
-    db = get_db()
-    cursor = db.cursor()
+    cursor = get_db().cursor()
 
     if filtro_usuario_id is not None:
         cursor.execute(
@@ -147,23 +145,26 @@ def atualizar_status_pedido(pedido_id: int, novo_status: str) -> bool:
         (novo_status, pedido_id),
     )
     db.commit()
-    return True
+    return cursor.rowcount > 0
 
 
 def relatorio_vendas() -> Dict[str, Any]:
-    db = get_db()
-    cursor = db.cursor()
-
+    cursor = get_db().cursor()
     cursor.execute(
         """
         SELECT
             COUNT(*) AS total_pedidos,
             COALESCE(SUM(total), 0) AS faturamento,
-            SUM(CASE WHEN status = 'pendente' THEN 1 ELSE 0 END) AS pendentes,
-            SUM(CASE WHEN status = 'aprovado' THEN 1 ELSE 0 END) AS aprovados,
-            SUM(CASE WHEN status = 'cancelado' THEN 1 ELSE 0 END) AS cancelados
+            SUM(CASE WHEN status = ? THEN 1 ELSE 0 END) AS pendentes,
+            SUM(CASE WHEN status = ? THEN 1 ELSE 0 END) AS aprovados,
+            SUM(CASE WHEN status = ? THEN 1 ELSE 0 END) AS cancelados
         FROM pedidos
-        """
+        """,
+        (
+            Config.ORDER_STATUS_PENDENTE,
+            Config.ORDER_STATUS_APROVADO,
+            Config.ORDER_STATUS_CANCELADO,
+        ),
     )
     row = cursor.fetchone()
     total_pedidos = row["total_pedidos"] or 0
@@ -188,49 +189,3 @@ def relatorio_vendas() -> Dict[str, Any]:
         "pedidos_cancelados": cancelados,
         "ticket_medio": round(faturamento / total_pedidos, 2) if total_pedidos > 0 else 0,
     }
-
-
-def get_database_counts() -> Dict[str, int]:
-    db = get_db()
-    cursor = db.cursor()
-    cursor.execute("SELECT 1")
-    cursor.execute("SELECT COUNT(*) FROM produtos")
-    produtos = cursor.fetchone()[0]
-    cursor.execute("SELECT COUNT(*) FROM usuarios")
-    usuarios = cursor.fetchone()[0]
-    cursor.execute("SELECT COUNT(*) FROM pedidos")
-    pedidos = cursor.fetchone()[0]
-    return {
-        "produtos": produtos,
-        "usuarios": usuarios,
-        "pedidos": pedidos,
-    }
-
-
-def reset_all_tables() -> None:
-    db = get_db()
-    cursor = db.cursor()
-    try:
-        cursor.execute("DELETE FROM itens_pedido")
-        cursor.execute("DELETE FROM pedidos")
-        cursor.execute("DELETE FROM produtos")
-        cursor.execute("DELETE FROM usuarios")
-        db.commit()
-    except Exception:
-        db.rollback()
-        raise
-
-
-def executar_query_segura(query: str) -> List[Dict[str, Any]]:
-    """Permite apenas consultas SELECT de leitura sem múltiplas instruções (;)."""
-    cleaned = query.strip()
-    if ";" in cleaned.rstrip(";"):
-        raise ValueError("Múltiplos comandos SQL não são permitidos")
-    if not cleaned.upper().startswith("SELECT"):
-        raise PermissionError("Apenas consultas SELECT de leitura são permitidas")
-
-    db = get_db()
-    cursor = db.cursor()
-    cursor.execute(cleaned)
-    rows = cursor.fetchall()
-    return [dict(row) for row in rows]

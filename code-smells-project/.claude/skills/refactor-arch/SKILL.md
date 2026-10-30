@@ -20,7 +20,7 @@ Você é um Arquiteto de Software Especialista em modernização de sistemas leg
    - Ao concluir a Fase 2, você **DEVE PAUSAR IMEDIATAMENTE** e perguntar ao usuário:
      `Phase 2 complete. Proceed with refactoring (Phase 3)? [y/n]`
    - **PROIBIDO** criar, editar, mover ou remover qualquer arquivo de código-fonte do projeto antes de receber confirmação explícita do usuário (`y` / `sim` / autorização explícita).
-4. **Preservação de Contratos Externos**: A refatoração da Fase 3 deve manter todas as rotas HTTP, verbos, códigos de status e formatos de resposta esperados pelos clientes originais (exceto vazamentos críticos de segredos explícitos, mantendo a estrutura funcional do endpoint).
+4. **Preservação de Contratos Externos**: A refatoração da Fase 3 deve manter todas as rotas HTTP, verbos, códigos de status e formatos de resposta esperados pelos clientes originais (exceto vazamentos críticos de segredos explícitos, mantendo a estrutura funcional do endpoint). **Exceção obrigatória**: endpoints administrativos/de debug/de manutenção sem autenticação (ex.: `/admin/query`, `/admin/reset-db`) **devem** ser removidos ou protegidos por autenticação fail-closed conforme o **Padrão 11** de `references/05-refactoring-playbook.md` — restringir apenas o payload (ex.: "somente `SELECT`") não fecha o finding.
 5. **Rastreabilidade Exata**: Todo finding reportado na Fase 2 deve conter o caminho relativo do arquivo e o intervalo exato de linhas (`arquivo:linha_inicio-linha_fim` ou `arquivo:linha`).
 
 ---
@@ -101,6 +101,7 @@ DB tables:     <Lista das tabelas/entidades identificadas>
      - **Projetos Parcialmente Organizados** (ex.: `task-manager-api`): Preserve o que já está modularizado em `models/`, crie a camada ausente `controllers/` movendo toda a regra de negócio e manipulação de banco que estava presa em `routes/`, separe domínios misturados (ex.: rotas de categorias misturadas em relatórios), crie `config/` e `middlewares/`, atualize APIs deprecated e remova vulnerabilidades e código morto.
 3. **Aplicação do Playbook de Transformações**:
    - Elimine **todos** os problemas CRITICAL, HIGH, MEDIUM e LOW apontados na Fase 2 seguindo os padrões antes/depois de `references/05-refactoring-playbook.md`.
+   - Para findings envolvendo endpoints administrativos/de debug, aplique a árvore de decisão do **Padrão 11**: rotas que executam SQL/comandos enviados pelo cliente são **removidas**; operações de manutenção legítimas são **protegidas** com autenticação fail-closed.
    - Mantenha a compatibilidade de inicialização do entry point (`app.py` ou `src/app.js`) e todos os contratos de rotas existentes.
 4. **Validação Funcional Obrigatória**:
    - Inicie a aplicação refatorada (ou utilize o cliente de teste HTTP / servidor em porta livre).
@@ -108,6 +109,7 @@ DB tables:     <Lista das tabelas/entidades identificadas>
      1. A aplicação inicia sem erros de sintaxe, importação ou configuração (`Application boots without errors`).
      2. Todos os endpoints originais respondem com os status codes e payloads esperados (`All endpoints respond correctly`).
      3. Nenhum anti-pattern auditado permanece no código (`Zero anti-patterns remaining`).
+     4. Para cada endpoint administrativo citado na Fase 2, os testes negativos do **Padrão 11** passam: rota removida responde `404`/`405`; rota protegida responde `401`/`403` (ou `404` sem token configurado) sem credencial ou com credencial errada, sem efeitos colaterais; e nenhuma rota devolve dados da tabela de usuários a partir de SQL enviado pelo cliente. Sem isso, `Zero anti-patterns remaining` **não** pode ser marcado.
 5. **Saída da Fase 3**: Imprima o resumo final:
 
 ```text

@@ -1,6 +1,8 @@
 # 05 — Playbook de Refatoração com Exemplos Antes/Depois (Fase 3)
 
-Este playbook fornece **10 padrões concretos de transformação de código** (com exemplos Antes e Depois em Python/Flask e Node.js/Express) mapeados diretamente para o catálogo de anti-patterns (`02-anti-patterns-catalog.md`).
+Este playbook fornece **11 padrões concretos de transformação de código** (com exemplos Antes e Depois em Python/Flask e Node.js/Express) mapeados diretamente para o catálogo de anti-patterns (`02-anti-patterns-catalog.md`).
+
+> **Regra de fechamento de findings em endpoints administrativos (obrigatória)**: sempre que um finding da Fase 2 citar uma rota administrativa, de debug ou de manutenção (ex.: `/admin/query`, `/admin/reset-db`, `/debug/*`, `/internal/*`, consoles SQL, rotas de seed/reset), o finding **só é considerado fechado** quando a rota for **removida** ou **protegida por autenticação + autorização fail-closed** conforme o **Padrão 11**. Restringir o payload (ex.: aceitar apenas `SELECT`, bloquear `;`, blacklist de palavras-chave) **não fecha** o finding — a rota continua aberta a qualquer pessoa.
 
 ---
 
@@ -57,6 +59,8 @@ def buscar_produtos(termo: str = "", categoria: str = None, preco_min: float = N
     cursor.execute(query, tuple(params))
     return [dict(row) for row in cursor.fetchall()]
 ```
+
+> **Atenção**: queries parametrizadas resolvem a concatenação de entrada em SQL fixo. **Não** se aplicam a endpoints que recebem a instrução SQL inteira no payload (ex.: `POST /admin/query` com `{"sql": "..."}`) — para esses, aplique obrigatoriamente o **Padrão 11** (remover a rota). Um "modo somente `SELECT`" ainda permite ler qualquer tabela, inclusive `usuarios.senha`.
 
 ---
 
@@ -475,3 +479,103 @@ try:
 except (ValueError, TypeError):
     return {'error': 'Formato de data inválido. Use YYYY-MM-DD'}, 400
 ```
+
+---
+
+## Padrão 11: Remoção ou Proteção de Endpoints Administrativos Perigosos (`CRITICAL`)
+
+Aplica-se a qualquer rota que execute operações privilegiadas sem passar pela autorização normal do domínio: consoles SQL, reset/seed de banco, dumps, flags de debug, rotas `/admin/*`, `/internal/*` e `/debug/*`.
+
+### Árvore de decisão (obrigatória na Fase 3)
+
+| Tipo de endpoint | Ação obrigatória | Justificativa |
+|---|---|---|
+| Executa SQL / código / comando enviado pelo cliente (ex.: `POST /admin/query` com `{"sql": ...}`) | **REMOVER** a rota, o handler do Controller e a função do Model | Não existe allowlist segura para SQL arbitrário: `SELECT` sozinho já lê qualquer tabela (`usuarios`, hashes de senha, tokens). Nenhum cliente de negócio depende desse contrato. |
+| Operação destrutiva ou de manutenção (ex.: `POST /admin/reset-db`, seed, purge) | **PROTEGER** com autenticação + autorização fail-closed (ou remover, se não houver uso legítimo) | A operação tem uso operacional legítimo, mas nunca pode ser anônima. |
+| Leitura administrativa com payload fixo (ex.: `GET /api/admin/financial-report`) | **PROTEGER** com autenticação + autorização de papel `admin` | Expõe dados agregados sensíveis. |
+
+### Requisitos da proteção (quando a rota for mantida)
+
+1. **Fail-closed**: se a credencial administrativa não estiver configurada no ambiente (ex.: `ADMIN_API_TOKEN` vazio), a rota fica **desabilitada** e responde `404`/`403` — nunca cai para "liberado".
+2. **Credencial fora do código**: lida de variável de ambiente via `config/settings` (Padrão 2). Nunca use fallback hardcoded para o token admin.
+3. **Comparação em tempo constante**: `hmac.compare_digest` (Python) / `crypto.timingSafeEqual` (Node.js).
+4. **Aplicada na camada de borda**: decorator/middleware em `middlewares/` aplicado no registro da rota (`views/`/`routes/`), não um `if` esquecível dentro do Controller.
+5. Se o projeto já possuir autenticação real (sessão/JWT com papel `admin`), reutilize-a e exija o papel `admin` em vez de criar um token paralelo.
+
+### Antes (Inseguro — "corrigido" apenas com restrição de payload)
+```python
+# views/routes.py
+api_bp.add_url_rule("/admin/reset-db", "reset_database", pedido_controller.reset_database, methods=["POST"])
+api_bp.add_url_rule("/admin/query", "executar_query", pedido_controller.executar_query, methods=["POST"])
+
+# models/pedido_model.py
+def executar_query_segura(query: str):
+    cleaned = query.strip()
+    if not cleaned.upper().startswith("SELECT"):   # ainda permite: SELECT email, senha FROM usuarios
+        raise PermissionError("Apenas consultas SELECT de leitura são permitidas")
+    cursor.execute(cleaned)
+```
+
+### Depois (Seguro — console SQL removido, manutenção protegida fail-closed)
+```python
+# config/settings.py
+class Config:
+    # Vazio por padrão: rotas administrativas ficam desabilitadas até o operador configurar o token.
+    ADMIN_API_TOKEN = os.environ.get("ADMIN_API_TOKEN", "")
+    ADMIN_TOKEN_HEADER = "X-Admin-Token"
+
+# middlewares/admin_auth.py
+import hmac
+from functools import wraps
+from flask import abort, request
+from config.settings import Config, logger
+
+def require_admin_token(view):
+    @wraps(view)
+    def wrapper(*args, **kwargs):
+        if not Config.ADMIN_API_TOKEN:
+            abort(404)  # fail-closed: rota inexistente enquanto o token não estiver configurado
+        provided = request.headers.get(Config.ADMIN_TOKEN_HEADER, "")
+        if not hmac.compare_digest(provided.encode(), Config.ADMIN_API_TOKEN.encode()):
+            logger.warning("Acesso administrativo negado em %s", request.path)
+            abort(401)
+        return view(*args, **kwargs)
+    return wrapper
+
+# views/routes.py  (/admin/query REMOVIDA: rota, controller e executar_query_segura apagados)
+api_bp.add_url_rule(
+    "/admin/reset-db", "reset_database",
+    require_admin_token(pedido_controller.reset_database), methods=["POST"],
+)
+```
+```javascript
+// src/middlewares/adminAuth.js
+const crypto = require('crypto');
+const settings = require('../config/settings');
+
+function requireAdminToken(req, res, next) {
+    if (!settings.adminApiToken) return res.status(404).send('Not Found'); // fail-closed
+    const provided = Buffer.from(String(req.get('X-Admin-Token') || ''));
+    const expected = Buffer.from(settings.adminApiToken);
+    if (provided.length !== expected.length || !crypto.timingSafeEqual(provided, expected)) {
+        return res.status(401).send('Unauthorized');
+    }
+    return next();
+}
+
+// src/views/routes.js
+router.get('/api/admin/financial-report', requireAdminToken, (req, res, next) => reportController.getFinancialReport(req, res, next));
+```
+
+### Validação obrigatória na Fase 3 (testes negativos)
+
+O item `Zero anti-patterns remaining` só pode ser marcado se, para **cada** endpoint administrativo citado na Fase 2:
+
+- **Rota removida** → requisição retorna `404`/`405` e não há mais referência ao handler/função no código (`grep` pelo nome do endpoint e da função do Model).
+- **Rota protegida** →
+  1. sem credencial → `401`/`403` (ou `404` se o token não estiver configurado) **e** nenhum efeito colateral (ex.: contagens do `/health` inalteradas após `POST /admin/reset-db`);
+  2. credencial errada → `401`/`403`;
+  3. credencial correta → status e payload originais preservados.
+- Uma tentativa de ler a tabela de usuários (ex.: `{"sql": "SELECT email, senha FROM usuarios"}`) **não** retorna dados em nenhuma rota.
+
+> **Contrato HTTP**: a remoção ou exigência de credencial nesses endpoints é uma exceção explícita à regra de preservação de contratos da skill. Liste no resumo da Fase 3 cada rota removida/protegida, o novo status sem credencial e a variável de ambiente necessária para operá-la.
